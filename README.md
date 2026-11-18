@@ -49,11 +49,12 @@ mac:event:key1:value1:key2:value2:...
 ```
 
 **Example:**
+
 ```
 aa-bb-cc-dd-ee-ff:awake:temp:25.5:humi:60
 ```
 
-- **MAC Address**: 6 bytes in `xx-xx-xx-xx-xx-xx` format
+- **MAC Address**: 6 hexadecimal bytes in `xx-xx-xx-xx-xx-xx` format (e.g., `aa-bb-cc-dd-ee-ff`)
 - **Event**: `awake`, `cmd`, or `sleep`
 - **Key-Value Pairs**: Up to 8 pairs of sensor data
 
@@ -114,14 +115,14 @@ docker run -it --rm \
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `SERIAL_PORT` | `/dev/ttyUSB0` | Serial port device path |
-| `BAUD_RATE` | `115200` | Serial port baud rate |
-| `MQTT_HOST` | `localhost` | MQTT broker hostname |
-| `MQTT_PORT` | `1883` | MQTT broker port |
-| `API_PORT` | `8080` | HTTP API server port |
-| `DB_PATH` | `/var/lib/iot_host/devices.db` | SQLite database path |
+| Environment Variable | Default                        | Description             |
+| -------------------- | ------------------------------ | ----------------------- |
+| `SERIAL_PORT`        | `/dev/ttyUSB0`                 | Serial port device path |
+| `BAUD_RATE`          | `115200`                       | Serial port baud rate   |
+| `MQTT_HOST`          | `localhost`                    | MQTT broker hostname    |
+| `MQTT_PORT`          | `1883`                         | MQTT broker port        |
+| `API_PORT`           | `8080`                         | HTTP API server port    |
+| `DB_PATH`            | `/var/lib/iot_host/devices.db` | SQLite database path    |
 
 ### Home Assistant Device Configuration API
 
@@ -132,30 +133,65 @@ The host provides a REST API for device configuration:
 Create or update device configuration with MQTT topic setup.
 
 **Request Body:**
+
 ```json
 {
   "mac": "AA_BB_CC_DD_EE_00",
   "device_name": "Living Room Sensor",
-  "mqtt_setup": [
+  "mqtt_configs": [
     {
-      "topic_prefix": "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature",
-      "config": {
+      // internal service will compose mac, type, field into topic eg. `homeassistant/<type>/<mac>/<field>/config
+      "type": "sensor",
+      "field": "temperature",
+      "payload": {
         "device_class": "temperature",
         "unit_of_measurement": "°C"
       }
     }
   ],
-  "msg_setup": [
-    {
-      "format": "direct_bind",
-      "key": "temperature",
-      "awake_event_topic": "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature/state"
+  "serial_to_mqtt": {
+    // serial event as key
+    "wake": {
+      // serial field as key, 1 field can populate more than 1 topic eg. both cmd and state topic
+      "temp": [
+        {
+          "type": "sensor",
+          "field": "temperature",
+          "topic": "state",
+          "device_type": "value" // `value`: directly publish the value to mqtt
+        }
+      ],
+      "light1": [
+        {
+          "type": "servo",
+          "field": "light_1",
+          "topic": "command",
+          "device_type": "mapping" // `mapping`: use specific func to convert the value and puhlish to mqtt. the func requires type, topic, payload to determine which mapping should be used
+        }
+      ]
     }
-  ]
+  },
+  "mqtt_to_serial": {
+    // field as key
+    "light_1": {
+      "value_type": "servo_command",
+      "topic_type": "light", // not in use for servo command
+      "topic_field": "light_1", // service use `light_1` to find the correct topic. eg. `light_1_direction/state` -> direction; `light_1_on/state` -> on value; `light_1_off/state` -> off value; `light_1/command` -> action
+      "topic": "state" // not in use for servo command
+    },
+    "sleep_dur": {
+      "type": "value",
+      // service will compose the topic to read value from
+      "topic_type": "light",
+      "topic_field": "sleep_duration",
+      "topic": "command"
+    }
+  }
 }
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -169,11 +205,13 @@ Create or update device configuration with MQTT topic setup.
 Delete a device by MAC address. The device is soft-deleted by setting a `deleted_at` timestamp.
 
 **Request:**
+
 ```
 DELETE /api/device/AA_BB_CC_DD_EE_00
 ```
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -182,49 +220,39 @@ DELETE /api/device/AA_BB_CC_DD_EE_00
 }
 ```
 
-### Message Setup Formats
+### DB schema
 
-#### Direct Bind
+We will create mqtt table and device table in sqlite to store all required data.
 
-Simple key-value binding for sensor data:
+#### MQTT table
 
-```json
-{
-  "format": "direct_bind",
-  "key": "temperature",
-  "awake_event_topic": "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature/state",
-  "sleep_event_topic": "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature/state",
-  "command_event_topic": "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature/command"
-}
+```sql
+create table mqtt_topic_values (
+  mac varchar(32) not null,
+  type varchar(64) not null,
+  field varchar(64) not null,
+  topic varchar (16) not null,
+  value varchar(1024) not null,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
 ```
 
-#### Servo Compose
+#### devices table
 
-For devices requiring composed values (e.g., servo position with direction):
-
-```json
-{
-  "format": "servo_compose",
-  "key": "servo",
-  "command_event": {
-    "direction_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/direction/state",
-    "action_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/action/state",
-    "on_value_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/on_value/state",
-    "off_value_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/off_value/state"
-  },
-  "sleep_event": {
-    "direction_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/direction/state",
-    "action_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/action/state",
-    "on_value_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/on_value/state",
-    "off_value_topic": "homeassistant/cover/AA_BB_CC_DD_EE_00/off_value/state"
-  }
-}
+```sql
+create table iot_device_configs (
+  mac varchar(32) not null,
+  device_name varchar(128) not null,
+  mqtt_configs text,
+  serial_to_mqtt text,
+  mqtt_to_serial text,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+)
 ```
-
-**Compose Examples:**
-- `direction=clock, action=on, on_value=20` → `+20`
-- `direction=anticlock, action=on, on_value=20` → `-20`
-- `action=null` → `n/a`
 
 ## Development
 
