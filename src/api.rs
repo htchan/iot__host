@@ -1,174 +1,196 @@
+//! REST API (docs/v2/api-design.md).
+//!
+//! - `POST /api/devices` — upsert device config; on first create (or revival of a
+//!   soft-deleted device) publishes the `mqtt_configs` payloads to
+//!   `homeassistant/<type>/<mac>/<name>/config` and seeds `default_state` /
+//!   `default_command` into `mqtt_topic_values`.
+//! - `DELETE /api/devices/{mac}` (alias `DELETE /api/device/{mac}`) — soft delete.
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
-    routing::{post, delete},
+    routing::{delete, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use serde::Serialize;
 
-use crate::device_store::{DeviceStore, DeviceConfig};
-use crate::device_state::DeviceState;
+use crate::db::{DeviceStore, UpsertOutcome};
+use crate::model::{
+    is_valid_mac, normalize_mac, compose_mqtt_topic, DeviceConfig, KeyMapping, MqttConfigItem,
+    ReplyTopic,
+};
+use crate::mqtt::MqttClient;
 
-/// Request payload for upsert device config
-#[derive(Debug, Deserialize)]
-pub struct UpsertDeviceRequest {
-    pub mac: String,
-    pub device_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mqtt_setup: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub msg_setup: Option<serde_json::Value>,
+/// Shared API state.
+#[derive(Clone)]
+pub struct AppState {
+    pub store: DeviceStore,
+    pub mqtt: MqttClient,
 }
 
-/// Request payload for publish all devices
-#[derive(Debug, Deserialize)]
-pub struct PublishAllRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mac: Option<String>,
-}
-
-/// Response payload
-#[derive(Debug, Serialize)]
+/// Standard response body per api-design.md.
+#[derive(Serialize)]
 pub struct ApiResponse {
     pub success: bool,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<usize>,
+    pub device_id: String,
 }
 
-/// Shared state for the API
-#[derive(Clone)]
-pub struct AppState {
-    pub serial_tx: mpsc::UnboundedSender<String>,
-    pub device_store: Option<Arc<DeviceStore>>,
-    pub mqtt_handler: Option<Arc<crate::mqtt::MqttHandler>>,
-    pub device_state: Option<Arc<DeviceState>>,
+/// Error body (shape kept consistent with ApiResponse, minus device_id).
+#[derive(Serialize)]
+pub struct ApiError {
+    pub success: bool,
+    pub message: String,
 }
 
-/// Create the API router
+/// Request body for POST /api/devices.
+#[derive(serde::Deserialize)]
+pub struct UpsertDeviceRequest {
+    pub mac: String,
+    pub device_name: String,
+    #[serde(default)]
+    pub mqtt_configs: Option<Vec<MqttConfigItem>>,
+    #[serde(default)]
+    pub reply_topics: Option<Vec<ReplyTopic>>,
+    #[serde(default)]
+    pub esp_now_key_mappings: Option<std::collections::HashMap<String, KeyMapping>>,
+    pub wake_msg: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     Router::new()
-        .route("/api/device", post(upsert_device))
-        .route("/api/device/publish-all", post(publish_all_devices))
+        .route("/api/devices", post(upsert_device))
+        // TODO: we only need /devices/ api, please help clean up the /device/ one.
+        .route("/api/devices/{mac}", delete(delete_device))
+        // alias kept because api-design.md heading uses /api/device/{mac}
+        // while its own example uses /api/devices/{mac} (decision D1)
         .route("/api/device/{mac}", delete(delete_device))
         .with_state(state)
 }
 
-/// Upsert device config - POST /api/device
 async fn upsert_device(
     State(state): State<AppState>,
     Json(payload): Json<UpsertDeviceRequest>,
-) -> Result<Json<ApiResponse>, (StatusCode, Json<String>)> {
-    let mac = payload.mac.clone();
+) -> Result<Json<ApiResponse>, (StatusCode, Json<ApiError>)> {
+    let mac = normalize_mac(&payload.mac);
+    if !is_valid_mac(&mac) {
+        return Err(bad_request("invalid mac; expected AA_BB_CC_DD_EE_00"));
+    }
+    if payload.device_name.trim().is_empty() {
+        return Err(bad_request("device_name must not be empty"));
+    }
+    if payload.wake_msg.is_empty() {
+        return Err(bad_request("wake_msg must not be empty"));
+    }
 
-    if let Some(store) = &state.device_store {
-        let device_config = DeviceConfig {
-            mac: payload.mac.clone(),
-            device_name: payload.device_name.clone(),
-            mqtt_setup: payload.mqtt_setup.clone().and_then(|v| serde_json::from_value(v).ok()),
-            msg_setup: payload.msg_setup.clone().and_then(|v| serde_json::from_value(v).ok()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            deleted_at: None,
-        };
+    let now = crate::model::now_rfc3339();
+    let config = DeviceConfig {
+        mac: mac.clone(),
+        device_name: payload.device_name.clone(),
+        mqtt_configs: payload.mqtt_configs.clone(),
+        reply_topics: payload.reply_topics.clone(),
+        esp_now_key_mappings: payload.esp_now_key_mappings.clone(),
+        wake_msg: payload.wake_msg.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        deleted_at: None,
+    };
 
-        if let Err(e) = store.upsert_device(&device_config).await {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(format!("Failed to save device config: {}", e)),
-            ));
-        }
+    let outcome: UpsertOutcome = state
+        .store
+        .upsert_device(&config)
+        .await
+        .map_err(|e| internal(format!("failed to save device config: {}", e)))?;
 
-        // Publish HA discovery for each mqtt_setup item
-        if let Some(mqtt_setup) = &payload.mqtt_setup {
-            if let Some(mqtt) = &state.mqtt_handler {
-                // Parse the mqtt_setup array and publish discovery for each item
-                if let Ok(setups) = serde_json::from_value::<Vec<serde_json::Value>>(mqtt_setup.clone()) {
-                    for item in setups {
-                        if let Some(topic_prefix) = item.get("topic_prefix").and_then(|v| v.as_str()) {
-                            // Build config topic: topic_prefix + /config
-                            let config_topic = format!("{}/config", topic_prefix);
-                            
-                            // Get the config payload from mqtt_setup item
-                            let payload = item.get("config").cloned().unwrap_or_default();
-                            let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
-                            
-                            let _ = mqtt.publish(&config_topic, &payload_bytes).await;
-                        }
-                    }
+    if outcome.republish_configs {
+        if let Some(items) = &payload.mqtt_configs {
+            for item in items {
+                // TODO: in mqtt config, `name` is wrong key, the correct key is `field`. You should append `/config` at the last by yourself
+                let topic = compose_mqtt_topic(&item.r#type, &mac, &item.name);
+                let payload = serde_json::to_vec(&item.config_payload).unwrap_or_default();
+                if let Err(e) = state.mqtt.publish(&topic, &String::from_utf8_lossy(&payload), true).await {
+                    return Err(internal(format!("failed to publish config to {}: {}", topic, e)));
                 }
             }
         }
-
-        Ok(Json(ApiResponse {
-            success: true,
-            message: format!("Device config saved for {}", mac),
-            device_id: Some(mac),
-            count: None,
-        }))
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json("DeviceStore not configured".to_string()),
-        ))
     }
+
+    if outcome.seed_defaults {
+        if let Some(items) = &payload.mqtt_configs {
+            for item in items {
+                // TODO: the default state and default command is not only store in DB. You should publish them into mqtt before saving them into DB
+                // TODO: for the mqtt topic, you need to append `/state` or `/command` to it by checcking if it is default_state or default_command.
+                if let Some(v) = &item.default_state {
+                    let _ = state
+                        .store
+                        .insert_value_if_absent(&mac, &item.r#type, &item.name, "state", v)
+                        .await;
+                }
+                if let Some(v) = &item.default_command {
+                    let _ = state
+                        .store
+                        .insert_value_if_absent(&mac, &item.r#type, &item.name, "command", v)
+                        .await;
+                }
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse {
+        success: true,
+        message: format!("Device config saved for {}", mac),
+        device_id: mac,
+    }))
 }
 
-/// Publish all device configs - POST /api/device/publish-all
-async fn publish_all_devices(
-    State(state): State<AppState>,
-    Json(payload): Json<PublishAllRequest>,
-) -> Result<Json<ApiResponse>, (StatusCode, Json<String>)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json("Publish-all endpoint not implemented".to_string()),
-    ))
-}
-
-/// Delete device config - DELETE /api/device/{mac}
 async fn delete_device(
     State(state): State<AppState>,
     Path(mac): Path<String>,
-) -> Result<Json<ApiResponse>, (StatusCode, Json<String>)> {
-    if let Some(store) = &state.device_store {
-        let now = chrono::Utc::now().to_rfc3339();
-        
-        // Get existing device config
-        if let Some(mut device) = store.get_device(&mac).await.map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(format!("Failed to get device: {}", e)),
-        ))? {
-            device.deleted_at = Some(now.clone());
-            device.updated_at = now;
-            
-            if let Err(e) = store.upsert_device(&device).await {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(format!("Failed to delete device: {}", e)),
-                ));
-            }
-            
-            Ok(Json(ApiResponse {
-                success: true,
-                message: format!("Device {} deleted", mac),
-                device_id: Some(mac),
-                count: None,
-            }))
-        } else {
-            Err((
-                StatusCode::NOT_FOUND,
-                Json(format!("Device {} not found", mac)),
-            ))
-        }
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json("DeviceStore not configured".to_string()),
-        ))
+) -> Result<Json<ApiResponse>, (StatusCode, Json<ApiError>)> {
+    let mac = normalize_mac(&mac);
+    if !is_valid_mac(&mac) {
+        return Err(bad_request("invalid mac; expected AA_BB_CC_DD_EE_00"));
     }
+
+    let deleted = state
+        .store
+        .soft_delete_device(&mac)
+        .await
+        .map_err(|e| internal(format!("failed to delete device: {}", e)))?;
+    if !deleted {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                success: false,
+                message: format!("Device {} not found", mac),
+            }),
+        ));
+    }
+
+    Ok(Json(ApiResponse {
+        success: true,
+        message: format!("Device {} deleted", mac),
+        device_id: mac,
+    }))
+}
+
+fn bad_request(msg: &str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            success: false,
+            message: msg.to_string(),
+        }),
+    )
+}
+
+fn internal(msg: String) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiError {
+            success: false,
+            message: msg,
+        }),
+    )
 }
