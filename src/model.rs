@@ -65,7 +65,11 @@ pub struct DeviceConfig {
     pub reply_topics: Option<Vec<ReplyTopic>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub esp_now_key_mappings: Option<HashMap<String, KeyMapping>>,
-    // TODO: add extra field encryption key, which used as AES encrypt & decrypt in ESP Now communication. Please also update the db and docs accordingly
+    /// Software-encryption key synced to the hub in the setup message
+    /// (`[<mac>]setup/<encryption_key>/<wake_msg>`); used by the ESP-Now
+    /// software encryption (docs/v1/esp-now-design.md).
+    #[serde(default)]
+    pub encryption_key: String,
     pub wake_msg: String,
     pub created_at: String,
     pub updated_at: String,

@@ -34,6 +34,7 @@ create table if not exists iot_device_configs (
   replay_topics text,
   topic_mappings text,
   wake_msg varchar(128) not null,
+  encryption_key varchar(128) not null default '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT
@@ -115,8 +116,8 @@ impl DeviceStore {
                     r#"
                     insert into iot_device_configs
                         (mac, device_name, mqtt_configs, replay_topics, topic_mappings,
-                         wake_msg, created_at, updated_at, deleted_at)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                         wake_msg, encryption_key, created_at, updated_at, deleted_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     "#,
                 )
                 .bind(&config.mac)
@@ -125,6 +126,7 @@ impl DeviceStore {
                 .bind(reply_topics)
                 .bind(topic_mappings)
                 .bind(&config.wake_msg)
+                .bind(&config.encryption_key)
                 .bind(&config.created_at)
                 .bind(&now)
                 .execute(&self.pool)
@@ -135,7 +137,8 @@ impl DeviceStore {
                     r#"
                     update iot_device_configs
                     set device_name = ?, mqtt_configs = ?, replay_topics = ?,
-                        topic_mappings = ?, wake_msg = ?, updated_at = ?, deleted_at = NULL
+                        topic_mappings = ?, wake_msg = ?, encryption_key = ?,
+                        updated_at = ?, deleted_at = NULL
                     where mac = ?
                     "#,
                 )
@@ -144,6 +147,7 @@ impl DeviceStore {
                 .bind(reply_topics)
                 .bind(topic_mappings)
                 .bind(&config.wake_msg)
+                .bind(&config.encryption_key)
                 .bind(&now)
                 .bind(&config.mac)
                 .execute(&self.pool)
@@ -159,7 +163,7 @@ impl DeviceStore {
         let row = sqlx::query(
             r#"
             select mac, device_name, mqtt_configs, replay_topics, topic_mappings,
-                   wake_msg, created_at, updated_at, deleted_at
+                   wake_msg, encryption_key, created_at, updated_at, deleted_at
             from iot_device_configs
             where mac = ? and deleted_at is null
             "#,
@@ -175,9 +179,10 @@ impl DeviceStore {
             reply_topics: parse_json_column(r.get(3)),
             esp_now_key_mappings: parse_json_column(r.get(4)),
             wake_msg: r.get(5),
-            created_at: r.get(6),
-            updated_at: r.get(7),
-            deleted_at: r.get(8),
+            encryption_key: r.get(6),
+            created_at: r.get(7),
+            updated_at: r.get(8),
+            deleted_at: r.get(9),
         }))
     }
 
@@ -186,7 +191,7 @@ impl DeviceStore {
         let rows = sqlx::query(
             r#"
             select mac, device_name, mqtt_configs, replay_topics, topic_mappings,
-                   wake_msg, created_at, updated_at, deleted_at
+                   wake_msg, encryption_key, created_at, updated_at, deleted_at
             from iot_device_configs
             where deleted_at is null
             order by created_at asc
@@ -202,9 +207,10 @@ impl DeviceStore {
             reply_topics: parse_json_column(r.get(3)),
             esp_now_key_mappings: parse_json_column(r.get(4)),
             wake_msg: r.get(5),
-            created_at: r.get(6),
-            updated_at: r.get(7),
-            deleted_at: r.get(8),
+            encryption_key: r.get(6),
+            created_at: r.get(7),
+            updated_at: r.get(8),
+            deleted_at: r.get(9),
         })
         .collect())
     }
@@ -425,6 +431,7 @@ mod tests {
                 },
             )])),
             wake_msg: "xxx".to_string(),
+            encryption_key: "testkey".to_string(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
             deleted_at: None,

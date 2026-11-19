@@ -89,10 +89,9 @@ pub fn compose_serial_line(mac: &str, pairs: &[(String, String)]) -> String {
     format!("[{}]{}", mac, compose_esp_now_payload(pairs))
 }
 
-/// Compose the special setup line `[<mac>]setup/<wake_msg>`.
-// TODO: check latest docs to see how encrypt key was included in setup msg
-pub fn compose_setup_line(mac: &str, wake_msg: &str) -> String {
-    format!("[{}]setup/{}", mac, wake_msg)
+/// Compose the special setup line `[<mac>]setup/<encryption_key>/<wake_msg>`.
+pub fn compose_setup_line(mac: &str, encryption_key: &str, wake_msg: &str) -> String {
+    format!("[{}]setup/{}/{}", mac, encryption_key, wake_msg)
 }
 
 #[cfg(test)]
@@ -171,8 +170,12 @@ mod tests {
     #[test]
     fn test_compose_setup_line() {
         assert_eq!(
-            compose_setup_line("AA_BB_CC_DD_EE_00", "wake123"),
-            "[AA_BB_CC_DD_EE_00]setup/wake123"
+            compose_setup_line("AA_BB_CC_DD_EE_00", "key123", "wake123"),
+            "[AA_BB_CC_DD_EE_00]setup/key123/wake123"
+        );
+        assert_eq!(
+            compose_setup_line("AA_BB_CC_DD_EE_00", "", "wake123"),
+            "[AA_BB_CC_DD_EE_00]setup//wake123"
         );
     }
 }

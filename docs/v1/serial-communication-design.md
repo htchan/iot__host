@@ -29,7 +29,7 @@ This will trigger when there is an update from mqtt
 When the hub first time connect to host or when host restarted, host should send the setup msg to hub to tell hub what devices are available
 
 1. query all not deleted device config
-2. send to hub with following format: `[<mac>]setup/<wake_msg>`
-   a. hub should store the mac to wake msg mapping in memory.
+2. send to hub with following format: `[<mac>]setup/<encryption_key>/<wake_msg>`
+   a. hub should store the mac to encryption key and mac to wake msg mapping in memory.
 3. send the iot command to hub.
    a. hub should store the mac to command mapping in memory. If a ESP Now msg received containing wake_msg with matching mac, hub should reply the stored command immediately.
