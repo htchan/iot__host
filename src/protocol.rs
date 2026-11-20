@@ -1,5 +1,5 @@
-//! Serial / ESP-Now message protocol (docs/v2/serial-communication-design.md,
-//! docs/v2/esp-now-design.md).
+//! Serial / ESP-Now message protocol (docs/v1/serial-communication-design.md,
+//! docs/v1/esp-now-design.md).
 //!
 //! ESP-Now payload: `"<field>/<topic>:<value>","<field>/<topic>:<value>"`
 //! (a JSON string array without `[` `]`).
@@ -8,13 +8,15 @@
 //! `[AA_BB_CC_DD_EE_00]"temp/ste:25.5","humi/ste:60"`.
 //!
 //! Special host→hub lines (serial-communication-design.md):
-//! - setup: `[<mac>]setup/<wake_msg>`
+//! - setup: `[<mac>]setup/<encryption_key>/<wake_msg>`
 //! - command: the standard format composed from the device's `command` values.
 //!
 //! The host never enforces the 224-byte ESP-Now limit; the hub splits long
 //! messages. No crypto at this layer (encryption is hub↔device only).
 
-// TODO: should this file either put into model / serial?
+//! This module is intentionally kept separate from `model.rs` (pure data
+//! shapes) and `serial.rs` (I/O): it holds only the wire-format encode/decode
+//! logic so it can be unit-tested without opening a port.
 
 use crate::model::normalize_mac;
 
@@ -48,7 +50,8 @@ pub fn parse_serial_line(line: &str) -> Result<SerialMessage, String> {
     if payload.is_empty() {
         return Ok(SerialMessage { mac, pairs: vec![] });
     }
-    // TODO: add comment to tell that setup msg will only be sent from host to hub via serial so host dont need logic to parse setup msg
+    // Setup lines (`[<mac>]setup/<encryption_key>/<wake_msg>`) are sent only
+    // from the host to the hub over serial, so the host never parses them.
     if !payload.starts_with('"') {
         return Err(format!("payload must start with a quoted pair: {}", line));
     }
@@ -68,14 +71,31 @@ pub fn parse_serial_line(line: &str) -> Result<SerialMessage, String> {
     Ok(SerialMessage { mac, pairs })
 }
 
+/// Maximum length of a single composed pair item `"<key>:<value>"` (without
+/// the JSON quotes). Longer items are invalid per the hub firmware contract
+/// and are skipped with a warning.
+const MAX_PAIR_LEN: usize = 20;
+
 /// Compose the ESP-Now payload (no mac prefix) from key/value pairs.
-// TODO: add extra requirement, if length of pair items longer than 20 character. it will be invalid and we should log for it
+///
+/// Pair items longer than `MAX_PAIR_LEN` characters are invalid; they are
+/// skipped and a warning is logged so misconfigured mappings are visible.
 pub fn compose_esp_now_payload(pairs: &[(String, String)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| {
-            let element = format!("{}:{}", k, v);
-            serde_json::to_string(&element).expect("string serialization cannot fail")
+        .filter_map(|(k, v)| {
+            let item = format!("{}:{}", k, v);
+            if item.len() > MAX_PAIR_LEN {
+                log::warn!(
+                    "dropping invalid pair {:?}: {} chars exceeds MAX_PAIR_LEN ({})",
+                    item,
+                    item.len(),
+                    MAX_PAIR_LEN
+                );
+                None
+            } else {
+                Some(serde_json::to_string(&item).expect("string serialization cannot fail"))
+            }
         })
         .collect::<Vec<_>>()
         .join(",")
@@ -177,5 +197,22 @@ mod tests {
             compose_setup_line("AA_BB_CC_DD_EE_00", "", "wake123"),
             "[AA_BB_CC_DD_EE_00]setup//wake123"
         );
+    }
+
+    #[test]
+    fn test_compose_accepts_20_char_pair_item() {
+        // "temp/ste:25.55678901" is exactly MAX_PAIR_LEN (20) characters.
+        let pairs = vec![("temp/ste".to_string(), "25.55678901".to_string())];
+        assert_eq!(compose_esp_now_payload(&pairs), r#""temp/ste:25.55678901""#);
+    }
+
+    #[test]
+    fn test_compose_skips_overlong_pair_item() {
+        let pairs = vec![
+            ("temp/ste".to_string(), "25.5".to_string()),
+            // 21-character item: must be skipped with a warning.
+            ("humi/ste".to_string(), "60.1234567890123".to_string()),
+        ];
+        assert_eq!(compose_esp_now_payload(&pairs), r#""temp/ste:25.5""#);
     }
 }

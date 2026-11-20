@@ -1,4 +1,4 @@
-//! IoT Host — serial <-> MQTT bridge (docs/v2).
+//! IoT Host — serial <-> MQTT bridge (docs/v1).
 //!
 //! Wiring: config -> sqlite -> mqtt -> serial -> bridge tasks -> axum API.
 //! Setup messages to the hub are sent by the bridge when the serial port
@@ -50,6 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host: cfg.mqtt_host.clone(),
         port: cfg.mqtt_port,
         client_id: format!("iot_host__{}", &uuid::Uuid::new_v4().to_string()[..8]),
+        username: cfg.mqtt_username.clone(),
+        password: cfg.mqtt_password.clone(),
     })
     .await
     .map_err(|e| format!("mqtt connect failed: {}", e))?;

@@ -10,6 +10,8 @@ Create or update device configuration with MQTT topic setup. It should publish t
 - `mqtt_configs` is the mqtt msg to be published when the device is first create to setup mqtt for further processing. it include the config payload, default state and command value
 - `reply_topics` is used to help parsing mqtt topic to a shorter key to save ESP Now msg space
 - `esp_now_key_mappings` is used to covert the ESP Now msg key into correct mqtt topic
+- `encryption_key` is synced to the hub inside the setup message
+  (`[<mac>]setup/<encryption_key>/<wake_msg>`) for ESP-Now software encryption
 
 **Request Body**
 
@@ -21,7 +23,7 @@ Create or update device configuration with MQTT topic setup. It should publish t
     {
       // internal service will compose mac, type, field into topic eg. `homeassistant/<type>/<mac>/<field>/config
       "type": "sensor",
-      "name": "temperature",
+      "field": "temperature",
       "config_payload": {
         "device_class": "temperature",
         "unit_of_measurement": "°C"
@@ -43,7 +45,8 @@ Create or update device configuration with MQTT topic setup. It should publish t
       "name": "temperature/state" // <field>/<topic>
     }
   },
-  "wake_msg": "xxx" // sync wake msg to hub so hub will send the command when a esp now containing wake msg was received
+  "wake_msg": "xxx", // sync wake msg to hub so hub will send the command when a esp now containing wake msg was received
+  "encryption_key": "key123" // synced to the hub in the setup message for ESP-Now software encryption
 }
 ```
 
@@ -57,7 +60,7 @@ Create or update device configuration with MQTT topic setup. It should publish t
 }
 ```
 
-## DELETE /api/device/{mac} - Delete Device
+## DELETE /api/devices/{mac} - Delete Device
 
 Delete a device by MAC address. The device is soft-deleted by setting a `deleted_at` timestamp.
 

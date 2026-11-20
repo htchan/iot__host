@@ -26,6 +26,7 @@ create table iot_device_configs (
   replay_topics text,
   topic_mappings text,
   wake_msg varchar(128) not null,
+  encryption_key varchar(128) not null default '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT

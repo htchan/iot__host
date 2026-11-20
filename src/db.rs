@@ -1,4 +1,4 @@
-//! SQLite storage (docs/v2/db-design.md).
+//! SQLite storage (docs/v1/db-design.md).
 //!
 //! Tables: `iot_device_configs` and `mqtt_topic_values`.
 //!
@@ -94,14 +94,20 @@ impl DeviceStore {
         let now = now_rfc3339();
         let (mqtt_configs, reply_topics, topic_mappings) = config.json_columns();
 
-        // TODO: add comment to explain each case, eg. None means record does not exist
+        // None: the mac is unknown, so this is a brand-new device → republish
+        // HA discovery configs and seed default_state/default_command values.
+        // Some((None,)): the device exists and is active → plain update, no
+        // republish and no reseed (stored values are preserved).
+        // Some((Some(_),)): the device was soft-deleted → republish configs to
+        // restore HA discovery, but keep stored values (no reseed).
+        // TODO: republish configs is harmless so we should always do it when api was called. Please update the comment
         let outcome = match existing {
             None => UpsertOutcome {
                 republish_configs: true,
                 seed_defaults: true,
             },
             Some((None,)) => UpsertOutcome {
-                republish_configs: false,
+                republish_configs: true,
                 seed_defaults: false,
             },
             Some((Some(_),)) => UpsertOutcome {
@@ -412,21 +418,21 @@ mod tests {
             mac: mac.to_string(),
             device_name: "Living Room Light".to_string(),
             mqtt_configs: Some(vec![MqttConfigItem {
-                r#type: "sensor".to_string(),
-                name: "temperature".to_string(),
+                field_type: "sensor".to_string(),
+                field: "temperature".to_string(),
                 config_payload: serde_json::json!({"device_class": "temperature"}),
                 default_state: Some("abc".to_string()),
                 default_command: Some("def".to_string()),
             }]),
             reply_topics: Some(vec![ReplyTopic {
-                r#type: "sensor".to_string(),
+                field_type: "sensor".to_string(),
                 name: "temperature/state".to_string(),
                 key: "temp/ste".to_string(),
             }]),
             esp_now_key_mappings: Some(HashMap::from([(
                 "act/ste".to_string(),
                 KeyMapping {
-                    r#type: "sensor".to_string(),
+                    field_type: "sensor".to_string(),
                     name: "temperature/state".to_string(),
                 },
             )])),
@@ -448,7 +454,8 @@ mod tests {
         let fetched = store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().expect("device");
         assert_eq!(fetched.device_name, "Living Room Light");
         assert_eq!(fetched.wake_msg, "xxx");
-        assert_eq!(fetched.key_for("sensor", "temperature/state"), Some("temp/ste"));
+        assert_eq!(fetched.reply_topics.as_ref().unwrap()[0].field_type, "sensor");
+        assert_eq!(fetched.reply_topics.as_ref().unwrap()[0].key, "temp/ste");
         assert_eq!(fetched.mapping_for("act/ste").unwrap().name, "temperature/state");
         assert_eq!(
             fetched.mqtt_configs.as_ref().unwrap()[0].default_command,

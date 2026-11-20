@@ -1,19 +1,21 @@
 //! Orchestration between serial, MQTT and the DB.
 //!
-//! Implements the flows from docs/v2/serial-communication-design.md:
+//! Implements the flows from docs/v1/serial-communication-design.md:
 //!
 //! - Receiving serial msg: log -> parse pairs -> map keys via
-//!   `iot_device_configs.topic_mappings` -> publish MQTT one by one,
-//!   updating `mqtt_topic_values` (value is stored before publishing so the
-//!   loop-back echo of our own publish is detected as unchanged and does not
-//!   echo back to the hub).
-//! - Sending serial msg (on MQTT update): update `mqtt_topic_values` ->
-//!   load all related values by mac -> compose one line via
-//!   `iot_device_configs.reply_topics` (no length limit; the hub splits) ->
-//!   send to hub.
-//! - Special setup msgs on (re)start: `[<mac>]setup/<wake_msg>` followed by
-//!   the stored `command` values composed through `reply_topics`.
+//!   `iot_device_configs.topic_mappings` -> store value -> publish MQTT.
+//!   The value is stored BEFORE publishing so the loop-back echo of our own
+//!   publish is detected as unchanged and is not echoed back to the hub
+//!   (echo-loop guard; do not invert). After all pairs are applied, the
+//!   device's latest state is composed and sent back to the hub.
+//! - Sending serial msg (on MQTT update): store value -> load all values for
+//!   the mac -> compose one line via `iot_device_configs.reply_topics`, in
+//!   reply_topics order; values without a reply topic (e.g. config) stay on
+//!   MQTT only; no length limit, the hub splits long lines.
+//! - Setup on (re)start: `[<mac>]setup/<encryption_key>/<wake_msg>` followed
+//!   by one line with all reply_topics-mapped values.
 
+use std::collections::HashMap;
 use std::sync::{Arc, mpsc::Sender as StdSender};
 
 use log::{info, warn};
@@ -95,20 +97,30 @@ impl Bridge {
                 }
             };
 
-            let mqtt_topic = compose_mqtt_topic(&mapping.r#type, &device.mac, &mapping.name);
+            let mqtt_topic = compose_mqtt_topic(&mapping.field_type, &device.mac, &mapping.name);
 
-            // Store first: our own subscription will echo the publish back and
-            // must be recognized as unchanged (echo-loop guard).
-            // TODO: publish mqtt first, then update the db reocrd
+            // Store first, then publish: our own subscription echoes the
+            // publish back, and upsert_value reports it as unchanged, so the
+            // echo is not forwarded to the hub (echo-loop guard; do not
+            // invert the order).
             let _ = self
                 .store
-                .upsert_value(&device.mac, &mapping.r#type, &field, &mq_topic, value)
+                .upsert_value(&device.mac, &mapping.field_type, &field, &mq_topic, value)
                 .await;
 
-            if let Err(e) = self.mqtt.publish(&mqtt_topic, value, false).await {
+            if let Err(e) = self.mqtt.publish(&mqtt_topic, value).await {
                 warn!("failed to publish {}: {}", mqtt_topic, e);
             }
-            // TODO: after all updates. we should try to compose the latest serial msg and send it to hub
+        }
+
+        // After all pairs are applied, compose the device's latest state and
+        // send it back so the hub converges even if some values were stale.
+        let pairs = self.compose_pairs(&device).await;
+        if !pairs.is_empty() {
+            let reply = protocol::compose_serial_line(&msg.mac, &pairs);
+            if let Err(e) = self.serial_tx.send(reply) {
+                warn!("failed to send serial line: {}", e);
+            }
         }
     }
 
@@ -159,8 +171,11 @@ impl Bridge {
         }
     }
 
-    /// Drain the device's stored values into `(key, value)` pairs using
-    /// `reply_topics` (no length limit; the hub splits long lines).
+    /// Compose `(key, value)` pairs by iterating `reply_topics` in order and
+    /// looking each `<field>/<topic>` up in the device's stored values. Values
+    /// without a reply topic (e.g. config) stay on MQTT only; reply topics
+    /// without a stored value yet are skipped. No length limit: the hub
+    /// splits long lines.
     async fn compose_pairs(&self, device: &DeviceConfig) -> Vec<(String, String)> {
         let values = match self.store.load_values(&device.mac).await {
             Ok(v) => v,
@@ -170,16 +185,18 @@ impl Bridge {
             }
         };
 
-        let mut pairs = Vec::new();
-        // TODO: You are not going to iterate on values. You should iterate on the reply_topics of devices. 
-        // TODO: It is possible that some values under the device do not requires reply to hub and send to iot devices, eg. config...
-        // TODO: also, reply_topics define the order of the pairs
+        let mut by_name: HashMap<(String, String), String> = HashMap::new();
         for v in values {
             let name = format!("{}/{}", v.field, v.topic);
-            match device.key_for(&v.r#type, &name) {
-                Some(key) => pairs.push((key.to_string(), v.value)),
-                None => {
-                    // Values without a reply_topics mapping stay on MQTT only.
+            // TODO: check if we still use r#type? i think we are moving it to field_type?
+            by_name.insert((v.r#type, name), v.value);
+        }
+
+        let mut pairs = Vec::new();
+        if let Some(reply_topics) = device.reply_topics.as_ref() {
+            for rt in reply_topics {
+                if let Some(value) = by_name.get(&(rt.field_type.clone(), rt.name.clone())) {
+                    pairs.push((rt.key.clone(), value.clone()));
                 }
             }
         }
@@ -187,42 +204,26 @@ impl Bridge {
     }
 
     /// Special setup messages sent on host start / serial reconnect:
-    /// `[<mac>]setup/<wake_msg>` followed by the stored `command` values.
+    /// `[<mac>]setup/<encryption_key>/<wake_msg>` followed by one line holding
+    /// every reply_topics-mapped value.
     pub async fn send_setup_messages(&self) -> Result<(), String> {
         let devices = self.store.list_devices().await.map_err(|e| e.to_string())?;
         for device in &devices {
-            let setup_line = protocol::compose_setup_line(&device.mac, &device.wake_msg);
+            let setup_line = protocol::compose_setup_line(
+                &device.mac,
+                &device.encryption_key,
+                &device.wake_msg,
+            );
             self.send_line(&setup_line)?;
 
-            let command_pairs = self.load_command_pairs(device).await?;
-            if command_pairs.is_empty() {
+            let pairs = self.compose_pairs(device).await;
+            if pairs.is_empty() {
                 continue;
             }
-            let command_line = protocol::compose_serial_line(&device.mac, &command_pairs);
-            self.send_line(&command_line)?;
+            let values_line = protocol::compose_serial_line(&device.mac, &pairs);
+            self.send_line(&values_line)?;
         }
         Ok(())
-    }
-
-    /// Stored `command`-topic values mapped through `reply_topics` (D2).
-    // TODO: in setup, it will not only send the command pairs, other topic, eg. state should also be included. We should not specifically load the command topic only.
-    async fn load_command_pairs(
-        &self,
-        device: &DeviceConfig,
-    ) -> Result<Vec<(String, String)>, String> {
-        let values = self
-            .store
-            .load_values(&device.mac)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(values
-            .into_iter()
-            .filter(|v| v.topic == "command")
-            .filter_map(|v| {
-                let name = format!("{}/{}", v.field, v.topic);
-                device.key_for(&v.r#type, &name).map(|k| (k.to_string(), v.value))
-            })
-            .collect())
     }
 
     fn send_line(&self, line: &str) -> Result<(), String> {
@@ -258,7 +259,6 @@ mod tests {
     use super::*;
     use crate::model::{now_rfc3339, KeyMapping, MqttConfigItem, ReplyTopic};
     use crate::mqtt::MqttClient;
-    use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const MAC: &str = "AA_BB_CC_DD_EE_00";
@@ -277,20 +277,20 @@ mod tests {
             mac: MAC.to_string(),
             device_name: "Test".to_string(),
             mqtt_configs: Some(vec![MqttConfigItem {
-                r#type: "sensor".to_string(),
-                name: "temperature".to_string(),
+                field_type: "sensor".to_string(),
+                field: "temperature".to_string(),
                 config_payload: serde_json::json!({"device_class": "temperature"}),
                 default_state: Some("abc".to_string()),
                 default_command: Some("def".to_string()),
             }]),
             reply_topics: Some(vec![
                 ReplyTopic {
-                    r#type: "sensor".to_string(),
+                    field_type: "sensor".to_string(),
                     name: "temperature/state".to_string(),
                     key: "temp/ste".to_string(),
                 },
                 ReplyTopic {
-                    r#type: "sensor".to_string(),
+                    field_type: "sensor".to_string(),
                     name: "temperature/command".to_string(),
                     key: "temp/cmd".to_string(),
                 },
@@ -298,11 +298,12 @@ mod tests {
             esp_now_key_mappings: Some(HashMap::from([(
                 "act/ste".to_string(),
                 KeyMapping {
-                    r#type: "sensor".to_string(),
+                    field_type: "sensor".to_string(),
                     name: "temperature/state".to_string(),
                 },
             )])),
             wake_msg: "wake123".to_string(),
+            encryption_key: "testkey".to_string(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
             deleted_at: None,
@@ -404,9 +405,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_setup_messages_include_command_line() {
+    async fn test_setup_messages_include_all_mapped_values() {
         let (bridge, store, rx) = harness().await;
         store.upsert_device(&device()).await.unwrap();
+        store
+            .insert_value_if_absent(MAC, "sensor", "temperature", "state", "abc")
+            .await
+            .unwrap();
         store
             .insert_value_if_absent(MAC, "sensor", "temperature", "command", "def")
             .await
@@ -415,13 +420,16 @@ mod tests {
         bridge.send_setup_messages().await.unwrap();
 
         let setup = rx.try_recv().expect("setup line");
-        assert_eq!(setup, format!("[{MAC}]setup/wake123"));
-        let command = rx.try_recv().expect("command line");
-        assert_eq!(command, format!(r#"[{MAC}]"temp/cmd:def""#));
+        assert_eq!(setup, format!("[{MAC}]setup/testkey/wake123"));
+        let values = rx.try_recv().expect("values line");
+        assert_eq!(
+            values,
+            format!(r#"[{MAC}]"temp/ste:abc","temp/cmd:def""#)
+        );
     }
 
     #[tokio::test]
-    async fn test_setup_messages_without_command_values_send_setup_only() {
+    async fn test_setup_messages_without_values_send_setup_only() {
         let (bridge, store, rx) = harness().await;
         let cfg = DeviceConfig {
             wake_msg: "only-wake".to_string(),
@@ -432,7 +440,7 @@ mod tests {
         bridge.send_setup_messages().await.unwrap();
 
         let setup = rx.try_recv().expect("setup line");
-        assert_eq!(setup, format!("[{MAC}]setup/only-wake"));
-        assert!(rx.try_recv().is_err(), "no command line expected");
+        assert_eq!(setup, format!("[{MAC}]setup/testkey/only-wake"));
+        assert!(rx.try_recv().is_err(), "no values line expected");
     }
 }

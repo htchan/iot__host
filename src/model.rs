@@ -1,6 +1,6 @@
 //! Core data types shared across the API, DB, MQTT and serial layers.
 //!
-//! Field names follow docs/v2/api-design.md and docs/v2/db-design.md.
+//! Field names follow docs/v1/api-design.md and docs/v1/db-design.md.
 
 use std::collections::HashMap;
 
@@ -11,13 +11,13 @@ pub const TOPIC_PREFIX: &str = "homeassistant";
 
 /// One entry of the device request `mqtt_configs` array.
 ///
-/// `name` doubles as the MQTT "field": the host composes
-/// `homeassistant/<type>/<mac>/<name>/config` for HA discovery.
+/// `field` is the MQTT field segment: the host composes
+/// `homeassistant/<field_type>/<mac>/<field>/config` for HA discovery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttConfigItem {
-    // TODO: rename to field_type / sensor_type. avoid the r#type.
-    pub r#type: String,
-    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub field: String,
     pub config_payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_state: Option<String>,
@@ -31,8 +31,8 @@ pub struct MqttConfigItem {
 /// so the host can shrink MQTT topics when composing serial messages.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReplyTopic {
-    // TODO: rename to field_type / sensor_type. avoid the r#type.
-    pub r#type: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
     /// `<field>/<topic>`, e.g. `temperature/state`.
     pub name: String,
     /// Short key used on the wire, e.g. `temp/ste`.
@@ -45,8 +45,8 @@ pub struct ReplyTopic {
 /// it should be translated to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeyMapping {
-    // TODO: rename to field_type / sensor_type. avoid the r#type.
-    pub r#type: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
     /// `<field>/<topic>`, e.g. `temperature/state`.
     pub name: String,
 }
@@ -78,23 +78,6 @@ pub struct DeviceConfig {
 }
 
 impl DeviceConfig {
-    /// Look up the short ESP-Now key for a stored MQTT value, using `reply_topics`.
-    /// `name` is `<field>/<topic>`.
-    // TODO: seems it understand it wrongly. in the serial msg compose, we will have input
-    // - reply topics
-    // - hash map containg all mqtt value for that mac keyed by mqtt topic
-    // the process should be
-    // for each items in reply topics
-    //   compose the mqtt topic
-    //   query the hash map to get the value
-    //   compose the string item by `"<key>:<value>"`
-    // I cant see what is the usage of key_for. We may need a func to help convert the mac + type + name into mqtt topic
-    pub fn key_for(&self, r#type: &str, name: &str) -> Option<&str> {
-        self.reply_topics.as_ref()?.iter().find_map(|rt| {
-            (rt.r#type == r#type && rt.name == name).then(|| rt.key.as_str())
-        })
-    }
-
     /// Look up the MQTT mapping for an ESP-Now key, using `esp_now_key_mappings`.
     pub fn mapping_for(&self, key: &str) -> Option<&KeyMapping> {
         self.esp_now_key_mappings.as_ref()?.get(key)
@@ -102,7 +85,6 @@ impl DeviceConfig {
 }
 
 /// One row of the `mqtt_topic_values` table.
-// TODO: should we name this class as MqttRecord?
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttValue {
     pub mac: String,
@@ -239,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_topic_lookup() {
+    fn test_reply_topic_deserialize_keeps_wire_key_type() {
         let cfg: DeviceConfig = serde_json::from_str(
             r#"{
                 "mac": "AA_BB_CC_DD_EE_00",
@@ -254,11 +236,13 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(cfg.key_for("sensor", "temperature/state"), Some("temp/ste"));
-        assert_eq!(cfg.key_for("switch", "light/command"), Some("light/cmd"));
-        assert_eq!(cfg.key_for("sensor", "light/command"), None);
-        assert_eq!(cfg.key_for("switch", "temperature/state"), None);
-        assert_eq!(cfg.key_for("sensor", "missing/state"), None);
+        let rts = cfg.reply_topics.unwrap();
+        assert_eq!(rts[0].field_type, "sensor");
+        assert_eq!(rts[0].name, "temperature/state");
+        assert_eq!(rts[0].key, "temp/ste");
+        // serde roundtrip keeps the wire key "type"
+        let json = serde_json::to_string(&rts[0]).unwrap();
+        assert!(json.contains(r#""type":"sensor""#), "{}", json);
     }
 
     #[test]
@@ -278,7 +262,7 @@ mod tests {
         )
         .unwrap();
         let m = cfg.mapping_for("act/ste").expect("mapping");
-        assert_eq!(m.r#type, "sensor");
+        assert_eq!(m.field_type, "sensor");
         assert_eq!(m.name, "temperature/state");
         assert!(cfg.mapping_for("nope").is_none());
     }
@@ -309,7 +293,7 @@ mod tests {
                 "mqtt_configs": [
                     {
                         "type": "sensor",
-                        "name": "temperature",
+                        "field": "temperature",
                         "config_payload": {"device_class": "temperature"},
                         "default_state": "abc",
                         "default_command": "def"
@@ -328,9 +312,9 @@ mod tests {
         assert_eq!(cfg.mac, "AA_BB_CC_DD_EE_00");
         assert_eq!(cfg.wake_msg, "xxx");
         let item = cfg.mqtt_configs.as_ref().unwrap()[0].clone();
+        assert_eq!(item.field, "temperature");
         assert_eq!(item.default_state.as_deref(), Some("abc"));
         assert_eq!(item.default_command.as_deref(), Some("def"));
-        assert_eq!(cfg.key_for("sensor", "temperature/state"), Some("temp/ste"));
         assert_eq!(cfg.mapping_for("act/ste").unwrap().name, "temperature/state");
         // JSON column content uses API field names; DB column names differ.
         let json = serde_json::to_string(&cfg).unwrap();

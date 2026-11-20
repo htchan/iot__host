@@ -1,4 +1,4 @@
-//! Serial port communication with the hub (docs/v2/serial-communication-design.md).
+//! Serial port communication with the hub (docs/v1/serial-communication-design.md).
 //!
 //! A dedicated OS thread owns the blocking `serialport` handle:
 //! - it reads lines from the hub and forwards them as `SerialEvent::Line`,
@@ -91,7 +91,11 @@ fn run_loop(
         let _ = incoming_tx.send(SerialEvent::PortOpened);
 
         // One serial session: until the port errors out.
-        // TODO: do we need to put the loop into a thread? will it block the existing flow?
+        // This loop already runs on the dedicated "serial-hub" OS thread
+        // spawned in `spawn()`, so its blocking reads never stall the async
+        // bridge or the API server. The 100ms read timeout plus the
+        // non-blocking `try_recv` drain above keep the loop responsive to
+        // both incoming lines and outgoing commands.
         'session: loop {
             // 1. drain outgoing lines (non-blocking)
             while let Ok(line) = outgoing_rx.try_recv() {

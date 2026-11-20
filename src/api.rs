@@ -1,10 +1,11 @@
-//! REST API (docs/v2/api-design.md).
+//! REST API (docs/v1/api-design.md).
 //!
 //! - `POST /api/devices` — upsert device config; on first create (or revival of a
 //!   soft-deleted device) publishes the `mqtt_configs` payloads to
-//!   `homeassistant/<type>/<mac>/<name>/config` and seeds `default_state` /
-//!   `default_command` into `mqtt_topic_values`.
-//! - `DELETE /api/devices/{mac}` (alias `DELETE /api/device/{mac}`) — soft delete.
+//!   `homeassistant/<type>/<mac>/<field>/config` and publishes `default_state` /
+//!   `default_command` to `.../state` / `.../command` before seeding them into
+//!   `mqtt_topic_values`.
+//! - `DELETE /api/devices/{mac}` — soft delete.
 
 use axum::{
     extract::{Path, State},
@@ -56,16 +57,14 @@ pub struct UpsertDeviceRequest {
     #[serde(default)]
     pub esp_now_key_mappings: Option<std::collections::HashMap<String, KeyMapping>>,
     pub wake_msg: String,
+    #[serde(default)]
+    pub encryption_key: String,
 }
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/devices", post(upsert_device))
-        // TODO: we only need /devices/ api, please help clean up the /device/ one.
         .route("/api/devices/{mac}", delete(delete_device))
-        // alias kept because api-design.md heading uses /api/device/{mac}
-        // while its own example uses /api/devices/{mac} (decision D1)
-        .route("/api/device/{mac}", delete(delete_device))
         .with_state(state)
 }
 
@@ -92,6 +91,7 @@ async fn upsert_device(
         reply_topics: payload.reply_topics.clone(),
         esp_now_key_mappings: payload.esp_now_key_mappings.clone(),
         wake_msg: payload.wake_msg.clone(),
+        encryption_key: payload.encryption_key.clone(),
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,
@@ -106,11 +106,20 @@ async fn upsert_device(
     if outcome.republish_configs {
         if let Some(items) = &payload.mqtt_configs {
             for item in items {
-                // TODO: in mqtt config, `name` is wrong key, the correct key is `field`. You should append `/config` at the last by yourself
-                let topic = compose_mqtt_topic(&item.r#type, &mac, &item.name);
+                let topic = format!(
+                    "{}/config",
+                    compose_mqtt_topic(&item.field_type, &mac, &item.field)
+                );
                 let payload = serde_json::to_vec(&item.config_payload).unwrap_or_default();
-                if let Err(e) = state.mqtt.publish(&topic, &String::from_utf8_lossy(&payload), true).await {
-                    return Err(internal(format!("failed to publish config to {}: {}", topic, e)));
+                if let Err(e) = state
+                    .mqtt
+                    .publish(&topic, &String::from_utf8_lossy(&payload))
+                    .await
+                {
+                    return Err(internal(format!(
+                        "failed to publish config to {}: {}",
+                        topic, e
+                    )));
                 }
             }
         }
@@ -119,18 +128,38 @@ async fn upsert_device(
     if outcome.seed_defaults {
         if let Some(items) = &payload.mqtt_configs {
             for item in items {
-                // TODO: the default state and default command is not only store in DB. You should publish them into mqtt before saving them into DB
-                // TODO: for the mqtt topic, you need to append `/state` or `/command` to it by checcking if it is default_state or default_command.
+                // Publish the defaults onto MQTT first so HA subscribers observe
+                // the initial values before they are persisted to the DB.
                 if let Some(v) = &item.default_state {
+                    let topic = format!(
+                        "{}/state",
+                        compose_mqtt_topic(&item.field_type, &mac, &item.field)
+                    );
+                    if let Err(e) = state.mqtt.publish(&topic, v).await {
+                        return Err(internal(format!(
+                            "failed to publish default state to {}: {}",
+                            topic, e
+                        )));
+                    }
                     let _ = state
                         .store
-                        .insert_value_if_absent(&mac, &item.r#type, &item.name, "state", v)
+                        .insert_value_if_absent(&mac, &item.field_type, &item.field, "state", v)
                         .await;
                 }
                 if let Some(v) = &item.default_command {
+                    let topic = format!(
+                        "{}/command",
+                        compose_mqtt_topic(&item.field_type, &mac, &item.field)
+                    );
+                    if let Err(e) = state.mqtt.publish(&topic, v).await {
+                        return Err(internal(format!(
+                            "failed to publish default command to {}: {}",
+                            topic, e
+                        )));
+                    }
                     let _ = state
                         .store
-                        .insert_value_if_absent(&mac, &item.r#type, &item.name, "command", v)
+                        .insert_value_if_absent(&mac, &item.field_type, &item.field, "command", v)
                         .await;
                 }
             }
