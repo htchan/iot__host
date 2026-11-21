@@ -44,8 +44,8 @@ create table if not exists iot_device_configs (
 /// Outcome of a device upsert, telling the caller which side effects to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpsertOutcome {
-    /// True when (re)created: republish HA discovery configs.
-    /// False for a plain update of an already-active device.
+    /// True: republish HA discovery configs (always, on every upsert —
+    /// retained topics simply converge).
     pub republish_configs: bool,
     /// True only for a brand-new device: seed `default_state` / `default_command`.
     pub seed_defaults: bool,
@@ -94,26 +94,13 @@ impl DeviceStore {
         let now = now_rfc3339();
         let (mqtt_configs, reply_topics, topic_mappings) = config.json_columns();
 
-        // None: the mac is unknown, so this is a brand-new device → republish
-        // HA discovery configs and seed default_state/default_command values.
-        // Some((None,)): the device exists and is active → plain update, no
-        // republish and no reseed (stored values are preserved).
-        // Some((Some(_),)): the device was soft-deleted → republish configs to
-        // restore HA discovery, but keep stored values (no reseed).
-        // TODO: republish configs is harmless so we should always do it when api was called. Please update the comment
-        let outcome = match existing {
-            None => UpsertOutcome {
-                republish_configs: true,
-                seed_defaults: true,
-            },
-            Some((None,)) => UpsertOutcome {
-                republish_configs: true,
-                seed_defaults: false,
-            },
-            Some((Some(_),)) => UpsertOutcome {
-                republish_configs: true,
-                seed_defaults: false,
-            },
+        // Republishing HA discovery configs is harmless (retained topics simply
+        // converge), so we always do it when the API is called. Seeding defaults
+        // is only for brand-new devices: a revived device keeps its stored
+        // values, and a plain update must not overwrite live state.
+        let outcome = UpsertOutcome {
+            republish_configs: true,
+            seed_defaults: existing.is_none(),
         };
 
         match existing {
@@ -242,7 +229,7 @@ impl DeviceStore {
     pub async fn upsert_value(
         &self,
         mac: &str,
-        r#type: &str,
+        field_type: &str,
         field: &str,
         topic: &str,
         value: &str,
@@ -252,7 +239,7 @@ impl DeviceStore {
             "select value from mqtt_topic_values where mac = ? and type = ? and field = ? and topic = ?",
         )
         .bind(mac)
-        .bind(r#type)
+        .bind(field_type)
         .bind(field)
         .bind(topic)
         .fetch_optional(&self.pool)
@@ -271,7 +258,7 @@ impl DeviceStore {
             )
             .bind(&now)
             .bind(mac)
-            .bind(r#type)
+            .bind(field_type)
             .bind(field)
             .bind(topic)
             .execute(&self.pool)
@@ -289,7 +276,7 @@ impl DeviceStore {
             "#,
         )
         .bind(mac)
-        .bind(r#type)
+        .bind(field_type)
         .bind(field)
         .bind(topic)
         .bind(value)
@@ -306,7 +293,7 @@ impl DeviceStore {
     pub async fn insert_value_if_absent(
         &self,
         mac: &str,
-        r#type: &str,
+        field_type: &str,
         field: &str,
         topic: &str,
         value: &str,
@@ -323,14 +310,14 @@ impl DeviceStore {
             "#,
         )
         .bind(mac)
-        .bind(r#type)
+        .bind(field_type)
         .bind(field)
         .bind(topic)
         .bind(value)
         .bind(&now)
         .bind(&now)
         .bind(mac)
-        .bind(r#type)
+        .bind(field_type)
         .bind(field)
         .bind(topic)
         .execute(&self.pool)
@@ -356,7 +343,7 @@ impl DeviceStore {
             .into_iter()
             .map(|r| MqttValue {
                 mac: r.get(0),
-                r#type: r.get(1),
+                field_type: r.get(1),
                 field: r.get(2),
                 topic: r.get(3),
                 value: r.get(4),
@@ -462,11 +449,11 @@ mod tests {
             Some("def".to_string())
         );
 
-        // update: no republish, no reseed
+        // update: republish (harmless), no reseed
         let mut cfg2 = cfg.clone();
         cfg2.device_name = "Renamed".to_string();
         let outcome = store.upsert_device(&cfg2).await.unwrap();
-        assert!(!outcome.republish_configs && !outcome.seed_defaults);
+        assert!(outcome.republish_configs && !outcome.seed_defaults);
         let fetched = store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().expect("device");
         assert_eq!(fetched.device_name, "Renamed");
         assert!(fetched.deleted_at.is_none());

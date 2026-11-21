@@ -88,7 +88,7 @@ impl DeviceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttValue {
     pub mac: String,
-    pub r#type: String,
+    pub field_type: String,
     pub field: String,
     pub topic: String,
     pub value: String,
@@ -99,7 +99,7 @@ pub struct MqttValue {
 /// A parsed MQTT topic `homeassistant/<type>/<mac>/<field>/<topic>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqttTopic {
-    pub r#type: String,
+    pub field_type: String,
     pub mac: String,
     pub field: String,
     pub topic: String,
@@ -113,8 +113,8 @@ impl MqttTopic {
 }
 
 /// Compose `homeassistant/<type>/<mac>/<name>` where `name` is `<field>/<topic>`.
-pub fn compose_mqtt_topic(r#type: &str, mac: &str, name: &str) -> String {
-    format!("{}/{}/{}/{}", TOPIC_PREFIX, r#type, mac, name)
+pub fn compose_mqtt_topic(field_type: &str, mac: &str, name: &str) -> String {
+    format!("{}/{}/{}/{}", TOPIC_PREFIX, field_type, mac, name)
 }
 
 /// Parse `homeassistant/<type>/<mac>/<field>/<topic>`.
@@ -127,7 +127,7 @@ pub fn parse_mqtt_topic(topic: &str) -> Option<MqttTopic> {
     }
     let last = parts.len() - 1;
     Some(MqttTopic {
-        r#type: parts[1].to_string(),
+        field_type: parts[1].to_string(),
         mac: parts[2].to_string(),
         field: parts[3..last].join("/"),
         topic: parts[last].to_string(),
@@ -190,7 +190,7 @@ mod tests {
     fn test_mqtt_topic_roundtrip() {
         let topic = "homeassistant/sensor/AA_BB_CC_DD_EE_00/temperature/state";
         let parsed = parse_mqtt_topic(topic).expect("parse");
-        assert_eq!(parsed.r#type, "sensor");
+        assert_eq!(parsed.field_type, "sensor");
         assert_eq!(parsed.mac, "AA_BB_CC_DD_EE_00");
         assert_eq!(parsed.field, "temperature");
         assert_eq!(parsed.topic, "state");
@@ -271,7 +271,7 @@ mod tests {
     fn test_mqtt_value_serde() {
         let v = MqttValue {
             mac: "M".into(),
-            r#type: "sensor".into(),
+            field_type: "sensor".into(),
             field: "f".into(),
             topic: "state".into(),
             value: "1".into(),

@@ -137,7 +137,7 @@ impl Bridge {
 
         let changed = match self
             .store
-            .upsert_value(&mac, &parsed.r#type, &parsed.field, &parsed.topic, &message.payload)
+            .upsert_value(&mac, &parsed.field_type, &parsed.field, &parsed.topic, &message.payload)
             .await
         {
             Ok(c) => c,
@@ -188,8 +188,10 @@ impl Bridge {
         let mut by_name: HashMap<(String, String), String> = HashMap::new();
         for v in values {
             let name = format!("{}/{}", v.field, v.topic);
-            // TODO: check if we still use r#type? i think we are moving it to field_type?
-            by_name.insert((v.r#type, name), v.value);
+            // `field_type` mirrors the `mqtt_topic_values.type` column (the MQTT
+            // type segment, e.g. "sensor") and holds the same value as
+            // `reply_topics[].field_type`, so the map key pairs them directly.
+            by_name.insert((v.field_type, name), v.value);
         }
 
         let mut pairs = Vec::new();
@@ -330,7 +332,7 @@ mod tests {
 
         let values = store.load_values(MAC).await.unwrap();
         assert_eq!(values.len(), 1);
-        assert_eq!(values[0].r#type, "sensor");
+        assert_eq!(values[0].field_type, "sensor");
         assert_eq!(values[0].field, "temperature");
         assert_eq!(values[0].topic, "state");
         assert_eq!(values[0].value, "on");
