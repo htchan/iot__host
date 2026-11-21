@@ -42,27 +42,24 @@ flowchart LR
 
 ### Serial Format
 
-Messages are transmitted as colon-separated strings:
+Messages are transmitted as quoted `"<key>:<value>"` pairs (a JSON string
+array without the brackets):
 
 ```
-mac:event:key1:value1:key2:value2:...
+[AA_BB_CC_DD_EE_00]"temp/ste:25.5","humi/ste:60"
 ```
 
-**Example:**
-
-```
-aa-bb-cc-dd-ee-ff:awake:temp:25.5:humi:60
-```
-
-- **MAC Address**: 6 hexadecimal bytes in `xx-xx-xx-xx-xx-xx` format (e.g., `aa-bb-cc-dd-ee-ff`)
-- **Event**: `awake`, `cmd`, or `sleep`
-- **Key-Value Pairs**: Up to 8 pairs of sensor data
+- **MAC Address**: 6 hexadecimal bytes in `AA_BB_CC_DD_EE_00` format
+- **Key-Value Pairs**: `"<field>/<topic>:<value>"` pairs, comma separated; each
+  pair item must be ≤ 20 characters (longer items are skipped with a warning)
+- **Setup line** (host → hub on (re)connect): `[<mac>]setup/<encryption_key>/<wake_msg>`,
+  followed by one line with all reply_topics-mapped values
 
 ### MQTT Topics
 
-- **Device Events**: `homeassistant/{device_class}/{mac}/{field}/state`
-- **Device Commands**: `homeassistant/{device_class}/{mac}/{field}/command`
-- **HA Discovery**: `homeassistant/{device_class}/{mac}/{field}/config`
+- **Device Events**: `homeassistant/{type}/{mac}/{field}/{topic}`
+- **Device Commands**: `homeassistant/{type}/{mac}/{field}/command`
+- **HA Discovery**: `homeassistant/{type}/{mac}/{field}/config`
 
 ## Installation
 
@@ -121,6 +118,8 @@ docker run -it --rm \
 | `BAUD_RATE`          | `115200`                       | Serial port baud rate   |
 | `MQTT_HOST`          | `localhost`                    | MQTT broker hostname    |
 | `MQTT_PORT`          | `1883`                         | MQTT broker port        |
+| `MQTT_USERNAME`      | _(none; optional)_             | MQTT username           |
+| `MQTT_PASSWORD`      | _(none; optional)_             | MQTT password           |
 | `API_PORT`           | `8080`                         | HTTP API server port    |
 | `DB_PATH`            | `/var/lib/iot_host/devices.db` | SQLite database path    |
 
@@ -128,65 +127,44 @@ docker run -it --rm \
 
 The host provides a REST API for device configuration:
 
-#### POST /api/device - Upsert Device
+#### POST /api/devices - Upsert Device
 
 Create or update device configuration with MQTT topic setup.
+It publishes the `mqtt_configs` content to MQTT when the device was first created.
 
 **Request Body:**
 
 ```json
 {
   "mac": "AA_BB_CC_DD_EE_00",
-  "device_name": "Living Room Sensor",
+  "device_name": "Living Room Light",
   "mqtt_configs": [
     {
-      // internal service will compose mac, type, field into topic eg. `homeassistant/<type>/<mac>/<field>/config
       "type": "sensor",
       "field": "temperature",
-      "payload": {
+      "config_payload": {
         "device_class": "temperature",
         "unit_of_measurement": "°C"
-      }
+      },
+      "default_state": "abc",
+      "default_command": "def"
     }
   ],
-  "serial_to_mqtt": {
-    // serial event as key
-    "wake": {
-      // serial field as key, 1 field can populate more than 1 topic eg. both cmd and state topic
-      "temp": [
-        {
-          "type": "sensor",
-          "field": "temperature",
-          "topic": "state",
-          "device_type": "value" // `value`: directly publish the value to mqtt
-        }
-      ],
-      "light1": [
-        {
-          "type": "servo",
-          "field": "light_1",
-          "topic": "command",
-          "device_type": "mapping" // `mapping`: use specific func to convert the value and puhlish to mqtt. the func requires type, topic, payload to determine which mapping should be used
-        }
-      ]
+  "reply_topics": [
+    {
+      "type": "sensor",
+      "name": "temperature/state",
+      "key": "temp/ste"
+    }
+  ],
+  "esp_now_key_mappings": {
+    "act/ste": {
+      "type": "sensor",
+      "name": "temperature/state"
     }
   },
-  "mqtt_to_serial": {
-    // field as key
-    "light_1": {
-      "value_type": "servo_command",
-      "topic_type": "light", // not in use for servo command
-      "topic_field": "light_1", // service use `light_1` to find the correct topic. eg. `light_1_direction/state` -> direction; `light_1_on/state` -> on value; `light_1_off/state` -> off value; `light_1/command` -> action
-      "topic": "state" // not in use for servo command
-    },
-    "sleep_dur": {
-      "type": "value",
-      // service will compose the topic to read value from
-      "topic_type": "light",
-      "topic_field": "sleep_duration",
-      "topic": "command"
-    }
-  }
+  "wake_msg": "xxx",
+  "encryption_key": "key123"
 }
 ```
 
@@ -200,14 +178,14 @@ Create or update device configuration with MQTT topic setup.
 }
 ```
 
-#### DELETE /api/device/{mac} - Delete Device
+#### DELETE /api/devices/{mac} - Delete Device
 
 Delete a device by MAC address. The device is soft-deleted by setting a `deleted_at` timestamp.
 
 **Request:**
 
 ```
-DELETE /api/device/AA_BB_CC_DD_EE_00
+DELETE /api/devices/AA_BB_CC_DD_EE_00
 ```
 
 **Response:**
@@ -234,8 +212,7 @@ create table mqtt_topic_values (
   topic varchar (16) not null,
   value varchar(1024) not null,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  deleted_at TEXT
+  updated_at TEXT NOT NULL
 );
 ```
 
@@ -246,12 +223,14 @@ create table iot_device_configs (
   mac varchar(32) not null,
   device_name varchar(128) not null,
   mqtt_configs text,
-  serial_to_mqtt text,
-  mqtt_to_serial text,
+  replay_topics text,
+  topic_mappings text,
+  wake_msg varchar(128) not null,
+  encryption_key varchar(128) not null default '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT
-)
+);
 ```
 
 ## Development
@@ -268,13 +247,14 @@ cargo test
 src/
 ├── lib.rs        # Module exports
 ├── main.rs       # Application entry point
-├── message.rs    # Message types and MQTT topics
-├── converter.rs  # Serial/MQTT message conversion
-├── serial.rs     # Serial port handler
-├── mqtt.rs       # MQTT handler
-├── api.rs        # HTTP API server
-├── device_store.rs  # SQLite device configuration storage
-├── device_state.rs  # In-memory device state tracking
+├── config.rs     # Environment configuration
+├── model.rs      # Core types, MQTT topic compose/parse, MAC normalization
+├── protocol.rs   # Serial line parse/compose (ESP-Now msg format)
+├── db.rs         # SQLite storage (iot_device_configs, mqtt_topic_values)
+├── serial.rs     # Serial port reader/writer thread with reconnect
+├── mqtt.rs       # MQTT client wrapper (rumqttc)
+├── bridge.rs     # Orchestration: serial <-> MQTT, setup messages
+└── api.rs        # HTTP API server (axum)
 ```
 
 ## Related Projects
