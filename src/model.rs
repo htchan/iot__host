@@ -105,13 +105,6 @@ pub struct MqttTopic {
     pub topic: String,
 }
 
-impl MqttTopic {
-    /// `<field>/<topic>`, the form used in `reply_topics` / `esp_now_key_mappings`.
-    pub fn name(&self) -> String {
-        format!("{}/{}", self.field, self.topic)
-    }
-}
-
 /// Compose `homeassistant/<type>/<mac>/<name>` where `name` is `<field>/<topic>`.
 pub fn compose_mqtt_topic(field_type: &str, mac: &str, name: &str) -> String {
     format!("{}/{}/{}/{}", TOPIC_PREFIX, field_type, mac, name)
@@ -192,7 +185,6 @@ mod tests {
         assert_eq!(parsed.mac, "AA_BB_CC_DD_EE_00");
         assert_eq!(parsed.field, "temperature");
         assert_eq!(parsed.topic, "state");
-        assert_eq!(parsed.name(), "temperature/state");
     }
 
     #[test]
@@ -200,7 +192,6 @@ mod tests {
         let parsed = parse_mqtt_topic("homeassistant/sensor/MAC/a/b/state").expect("parse");
         assert_eq!(parsed.field, "a/b");
         assert_eq!(parsed.topic, "state");
-        assert_eq!(parsed.name(), "a/b/state");
     }
 
     #[test]

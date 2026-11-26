@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy binary
-COPY --from=builder /build/target/release/iot__host ./
+COPY --from=builder /build/target/release/iot_host ./
 
 # Create non-root user
 RUN useradd -m -u 1000 iotuser
@@ -39,4 +39,4 @@ ENV MQTT_HOST=localhost
 ENV MQTT_PORT=1883
 
 # Run the application
-CMD ["./iot__host"]
+CMD ["./iot_host"]

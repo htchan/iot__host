@@ -58,15 +58,14 @@ pub struct DeviceStore {
 
 impl DeviceStore {
     pub async fn new(db_path: &str) -> Result<Self, sqlx::Error> {
-        if let Some(parent) = Path::new(db_path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    sqlx::Error::Configuration(
-                        format!("failed to create db parent dir {}: {}", parent.display(), e)
-                            .into(),
-                    )
-                })?;
-            }
+        if let Some(parent) = Path::new(db_path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                sqlx::Error::Configuration(
+                    format!("failed to create db parent dir {}: {}", parent.display(), e).into(),
+                )
+            })?;
         }
 
         let pool = SqlitePoolOptions::new()

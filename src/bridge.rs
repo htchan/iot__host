@@ -358,9 +358,9 @@ mod tests {
         let (bridge, _store, _rx) = harness().await;
         // must not panic
         bridge
-            .handle_serial_event(SerialEvent::Line(format!(
-                r#"[FF_FF_FF_FF_FF_FF]"act/ste:on""#
-            )))
+            .handle_serial_event(SerialEvent::Line(
+                r#"[FF_FF_FF_FF_FF_FF]"act/ste:on""#.to_string(),
+            ))
             .await;
     }
 

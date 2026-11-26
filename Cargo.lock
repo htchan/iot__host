@@ -818,7 +818,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "iot__host"
+name = "iot_host"
 version = "0.1.0"
 dependencies = [
  "axum",

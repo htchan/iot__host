@@ -83,6 +83,7 @@ impl MqttClient {
 
     /// Construct a client without connecting (used by tests; publish calls
     /// simply queue into the client buffer).
+    #[cfg(test)]
     pub fn test_client() -> Self {
         let options = MqttOptions::new("iot_host_test", "127.0.0.1", 1883);
         let (client, _) = AsyncClient::new(options, 10);

@@ -103,65 +103,65 @@ async fn upsert_device(
         .await
         .map_err(|e| internal(format!("failed to save device config: {}", e)))?;
 
-    if outcome.republish_configs {
-        if let Some(items) = &payload.mqtt_configs {
-            for item in items {
-                let topic = format!(
-                    "{}/config",
-                    compose_mqtt_topic(&item.field_type, &mac, &item.field)
-                );
-                let payload = serde_json::to_vec(&item.config_payload).unwrap_or_default();
-                if let Err(e) = state
-                    .mqtt
-                    .publish(&topic, &String::from_utf8_lossy(&payload))
-                    .await
-                {
-                    return Err(internal(format!(
-                        "failed to publish config to {}: {}",
-                        topic, e
-                    )));
-                }
+    if outcome.republish_configs
+        && let Some(items) = &payload.mqtt_configs
+    {
+        for item in items {
+            let topic = format!(
+                "{}/config",
+                compose_mqtt_topic(&item.field_type, &mac, &item.field)
+            );
+            let payload = serde_json::to_vec(&item.config_payload).unwrap_or_default();
+            if let Err(e) = state
+                .mqtt
+                .publish(&topic, &String::from_utf8_lossy(&payload))
+                .await
+            {
+                return Err(internal(format!(
+                    "failed to publish config to {}: {}",
+                    topic, e
+                )));
             }
         }
     }
 
-    if outcome.seed_defaults {
-        if let Some(items) = &payload.mqtt_configs {
-            for item in items {
-                // Publish the defaults onto MQTT first so HA subscribers observe
-                // the initial values before they are persisted to the DB.
-                if let Some(v) = &item.default_state {
-                    let topic = format!(
-                        "{}/state",
-                        compose_mqtt_topic(&item.field_type, &mac, &item.field)
-                    );
-                    if let Err(e) = state.mqtt.publish(&topic, v).await {
-                        return Err(internal(format!(
-                            "failed to publish default state to {}: {}",
-                            topic, e
-                        )));
-                    }
-                    let _ = state
-                        .store
-                        .insert_value_if_absent(&mac, &item.field_type, &item.field, "state", v)
-                        .await;
+    if outcome.seed_defaults
+        && let Some(items) = &payload.mqtt_configs
+    {
+        for item in items {
+            // Publish the defaults onto MQTT first so HA subscribers observe
+            // the initial values before they are persisted to the DB.
+            if let Some(v) = &item.default_state {
+                let topic = format!(
+                    "{}/state",
+                    compose_mqtt_topic(&item.field_type, &mac, &item.field)
+                );
+                if let Err(e) = state.mqtt.publish(&topic, v).await {
+                    return Err(internal(format!(
+                        "failed to publish default state to {}: {}",
+                        topic, e
+                    )));
                 }
-                if let Some(v) = &item.default_command {
-                    let topic = format!(
-                        "{}/command",
-                        compose_mqtt_topic(&item.field_type, &mac, &item.field)
-                    );
-                    if let Err(e) = state.mqtt.publish(&topic, v).await {
-                        return Err(internal(format!(
-                            "failed to publish default command to {}: {}",
-                            topic, e
-                        )));
-                    }
-                    let _ = state
-                        .store
-                        .insert_value_if_absent(&mac, &item.field_type, &item.field, "command", v)
-                        .await;
+                let _ = state
+                    .store
+                    .insert_value_if_absent(&mac, &item.field_type, &item.field, "state", v)
+                    .await;
+            }
+            if let Some(v) = &item.default_command {
+                let topic = format!(
+                    "{}/command",
+                    compose_mqtt_topic(&item.field_type, &mac, &item.field)
+                );
+                if let Err(e) = state.mqtt.publish(&topic, v).await {
+                    return Err(internal(format!(
+                        "failed to publish default command to {}: {}",
+                        topic, e
+                    )));
                 }
+                let _ = state
+                    .store
+                    .insert_value_if_absent(&mac, &item.field_type, &item.field, "command", v)
+                    .await;
             }
         }
     }

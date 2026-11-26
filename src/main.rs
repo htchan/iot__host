@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cfg = config::AppConfig::from_env();
-    info!("iot__host starting");
+    info!("iot_host starting");
 
     match serial::list_ports() {
         Ok(ports) if ports.is_empty() => log::warn!("no serial ports found"),
