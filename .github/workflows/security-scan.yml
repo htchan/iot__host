@@ -1,0 +1,28 @@
+name: security scan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/security-scan.yml"
+  schedule:
+    - cron: "0 0 * * 6"
+
+jobs:
+  rust-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Audit Rust dependencies
+        uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
