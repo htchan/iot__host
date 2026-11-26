@@ -1,7 +1,12 @@
 # Build stage
-FROM rust:1.81-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libudev-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy source
 COPY Cargo.toml Cargo.lock ./
