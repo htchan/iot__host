@@ -16,6 +16,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libudev-dev pkg-config
       # --- OFFICIAL GITHUB CACHE SELECTION ---
       - name: Cache Cargo dependencies and build artifacts
         uses: actions/cache@v4
