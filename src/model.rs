@@ -138,9 +138,7 @@ pub fn parse_mqtt_topic(topic: &str) -> Option<MqttTopic> {
 ///
 /// Accepts `aa-bb-cc-dd-ee-ff` and `AA:BB:CC:DD:EE:00` style input.
 pub fn normalize_mac(mac: &str) -> String {
-    mac.trim()
-        .to_uppercase()
-        .replace(['-', ':'], "_")
+    mac.trim().to_uppercase().replace(['-', ':'], "_")
 }
 
 /// Check the canonical MAC shape: 6 groups of 2 hex digits separated by `_`.
@@ -315,7 +313,10 @@ mod tests {
         assert_eq!(item.field, "temperature");
         assert_eq!(item.default_state.as_deref(), Some("abc"));
         assert_eq!(item.default_command.as_deref(), Some("def"));
-        assert_eq!(cfg.mapping_for("act/ste").unwrap().name, "temperature/state");
+        assert_eq!(
+            cfg.mapping_for("act/ste").unwrap().name,
+            "temperature/state"
+        );
         // JSON column content uses API field names; DB column names differ.
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"reply_topics\""));

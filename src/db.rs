@@ -8,10 +8,10 @@
 
 use std::path::Path;
 
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
-use crate::model::{now_rfc3339, DeviceConfig, MqttValue};
+use crate::model::{DeviceConfig, MqttValue, now_rfc3339};
 
 const CREATE_MQTT_TOPIC_VALUES: &str = r#"
 create table if not exists mqtt_topic_values (
@@ -61,12 +61,10 @@ impl DeviceStore {
         if let Some(parent) = Path::new(db_path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    sqlx::Error::Configuration(format!(
-                        "failed to create db parent dir {}: {}",
-                        parent.display(),
-                        e
+                    sqlx::Error::Configuration(
+                        format!("failed to create db parent dir {}: {}", parent.display(), e)
+                            .into(),
                     )
-                    .into())
                 })?;
             }
         }
@@ -77,19 +75,20 @@ impl DeviceStore {
             .await?;
 
         sqlx::query(CREATE_MQTT_TOPIC_VALUES).execute(&pool).await?;
-        sqlx::query(CREATE_IOT_DEVICE_CONFIGS).execute(&pool).await?;
+        sqlx::query(CREATE_IOT_DEVICE_CONFIGS)
+            .execute(&pool)
+            .await?;
 
         Ok(Self { pool })
     }
 
     /// Insert or update an active device config.
     pub async fn upsert_device(&self, config: &DeviceConfig) -> Result<UpsertOutcome, sqlx::Error> {
-        let existing: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT deleted_at FROM iot_device_configs WHERE mac = ?",
-        )
-        .bind(&config.mac)
-        .fetch_optional(&self.pool)
-        .await?;
+        let existing: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT deleted_at FROM iot_device_configs WHERE mac = ?")
+                .bind(&config.mac)
+                .fetch_optional(&self.pool)
+                .await?;
 
         let now = now_rfc3339();
         let (mqtt_configs, reply_topics, topic_mappings) = config.json_columns();
@@ -193,19 +192,21 @@ impl DeviceStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(|r| DeviceConfig {
-            mac: r.get(0),
-            device_name: r.get(1),
-            mqtt_configs: parse_json_column(r.get(2)),
-            reply_topics: parse_json_column(r.get(3)),
-            esp_now_key_mappings: parse_json_column(r.get(4)),
-            wake_msg: r.get(5),
-            encryption_key: r.get(6),
-            created_at: r.get(7),
-            updated_at: r.get(8),
-            deleted_at: r.get(9),
-        })
-        .collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| DeviceConfig {
+                mac: r.get(0),
+                device_name: r.get(1),
+                mqtt_configs: parse_json_column(r.get(2)),
+                reply_topics: parse_json_column(r.get(3)),
+                esp_now_key_mappings: parse_json_column(r.get(4)),
+                wake_msg: r.get(5),
+                encryption_key: r.get(6),
+                created_at: r.get(7),
+                updated_at: r.get(8),
+                deleted_at: r.get(9),
+            })
+            .collect())
     }
 
     /// Soft-delete a device by setting `deleted_at`.
@@ -397,7 +398,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("iot_host_test_{}_{}.db", tag, nanos));
-        DeviceStore::new(&path.to_string_lossy()).await.expect("store")
+        DeviceStore::new(&path.to_string_lossy())
+            .await
+            .expect("store")
     }
 
     fn sample_config(mac: &str) -> DeviceConfig {
@@ -438,12 +441,22 @@ mod tests {
         let outcome = store.upsert_device(&cfg).await.unwrap();
         assert!(outcome.republish_configs && outcome.seed_defaults);
 
-        let fetched = store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().expect("device");
+        let fetched = store
+            .get_device("AA_BB_CC_DD_EE_00")
+            .await
+            .unwrap()
+            .expect("device");
         assert_eq!(fetched.device_name, "Living Room Light");
         assert_eq!(fetched.wake_msg, "xxx");
-        assert_eq!(fetched.reply_topics.as_ref().unwrap()[0].field_type, "sensor");
+        assert_eq!(
+            fetched.reply_topics.as_ref().unwrap()[0].field_type,
+            "sensor"
+        );
         assert_eq!(fetched.reply_topics.as_ref().unwrap()[0].key, "temp/ste");
-        assert_eq!(fetched.mapping_for("act/ste").unwrap().name, "temperature/state");
+        assert_eq!(
+            fetched.mapping_for("act/ste").unwrap().name,
+            "temperature/state"
+        );
         assert_eq!(
             fetched.mqtt_configs.as_ref().unwrap()[0].default_command,
             Some("def".to_string())
@@ -454,7 +467,11 @@ mod tests {
         cfg2.device_name = "Renamed".to_string();
         let outcome = store.upsert_device(&cfg2).await.unwrap();
         assert!(outcome.republish_configs && !outcome.seed_defaults);
-        let fetched = store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().expect("device");
+        let fetched = store
+            .get_device("AA_BB_CC_DD_EE_00")
+            .await
+            .unwrap()
+            .expect("device");
         assert_eq!(fetched.device_name, "Renamed");
         assert!(fetched.deleted_at.is_none());
     }
@@ -462,37 +479,73 @@ mod tests {
     #[tokio::test]
     async fn test_soft_delete_and_revive() {
         let store = temp_store("soft_delete").await;
-        store.upsert_device(&sample_config("AA_BB_CC_DD_EE_00")).await.unwrap();
+        store
+            .upsert_device(&sample_config("AA_BB_CC_DD_EE_00"))
+            .await
+            .unwrap();
 
         assert!(store.soft_delete_device("AA_BB_CC_DD_EE_00").await.unwrap());
-        assert!(store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().is_none());
+        assert!(
+            store
+                .get_device("AA_BB_CC_DD_EE_00")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(store.list_devices().await.unwrap().is_empty());
         // second delete is a no-op
         assert!(!store.soft_delete_device("AA_BB_CC_DD_EE_00").await.unwrap());
 
         // revive: configs republished, defaults not reseeded
-        let outcome = store.upsert_device(&sample_config("AA_BB_CC_DD_EE_00")).await.unwrap();
+        let outcome = store
+            .upsert_device(&sample_config("AA_BB_CC_DD_EE_00"))
+            .await
+            .unwrap();
         assert!(outcome.republish_configs && !outcome.seed_defaults);
-        assert!(store.get_device("AA_BB_CC_DD_EE_00").await.unwrap().is_some());
+        assert!(
+            store
+                .get_device("AA_BB_CC_DD_EE_00")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
     async fn test_value_upsert_and_load() {
         let store = temp_store("values").await;
         let changed = store
-            .upsert_value("AA_BB_CC_DD_EE_00", "sensor", "temperature", "state", "25.5")
+            .upsert_value(
+                "AA_BB_CC_DD_EE_00",
+                "sensor",
+                "temperature",
+                "state",
+                "25.5",
+            )
             .await
             .unwrap();
         assert!(changed);
 
         let changed = store
-            .upsert_value("AA_BB_CC_DD_EE_00", "sensor", "temperature", "state", "25.5")
+            .upsert_value(
+                "AA_BB_CC_DD_EE_00",
+                "sensor",
+                "temperature",
+                "state",
+                "25.5",
+            )
             .await
             .unwrap();
         assert!(!changed);
 
         let changed = store
-            .upsert_value("AA_BB_CC_DD_EE_00", "sensor", "temperature", "state", "26.0")
+            .upsert_value(
+                "AA_BB_CC_DD_EE_00",
+                "sensor",
+                "temperature",
+                "state",
+                "26.0",
+            )
             .await
             .unwrap();
         assert!(changed);
@@ -509,14 +562,18 @@ mod tests {
     #[tokio::test]
     async fn test_insert_value_if_absent() {
         let store = temp_store("if_absent").await;
-        assert!(store
-            .insert_value_if_absent("M", "sensor", "temperature", "state", "first")
-            .await
-            .unwrap());
-        assert!(!store
-            .insert_value_if_absent("M", "sensor", "temperature", "state", "second")
-            .await
-            .unwrap());
+        assert!(
+            store
+                .insert_value_if_absent("M", "sensor", "temperature", "state", "first")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .insert_value_if_absent("M", "sensor", "temperature", "state", "second")
+                .await
+                .unwrap()
+        );
         let values = store.load_values("M").await.unwrap();
         assert_eq!(values[0].value, "first");
     }
@@ -524,8 +581,14 @@ mod tests {
     #[tokio::test]
     async fn test_list_devices_order() {
         let store = temp_store("list").await;
-        store.upsert_device(&sample_config("AA_BB_CC_DD_EE_00")).await.unwrap();
-        store.upsert_device(&sample_config("BB_BB_BB_BB_BB_BB")).await.unwrap();
+        store
+            .upsert_device(&sample_config("AA_BB_CC_DD_EE_00"))
+            .await
+            .unwrap();
+        store
+            .upsert_device(&sample_config("BB_BB_BB_BB_BB_BB"))
+            .await
+            .unwrap();
         let list = store.list_devices().await.unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].mac, "AA_BB_CC_DD_EE_00");

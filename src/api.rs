@@ -8,18 +8,18 @@
 //! - `DELETE /api/devices/{mac}` — soft delete.
 
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{delete, post},
-    Router,
 };
 use serde::Serialize;
 
 use crate::db::{DeviceStore, UpsertOutcome};
 use crate::model::{
-    is_valid_mac, normalize_mac, compose_mqtt_topic, DeviceConfig, KeyMapping, MqttConfigItem,
-    ReplyTopic,
+    DeviceConfig, KeyMapping, MqttConfigItem, ReplyTopic, compose_mqtt_topic, is_valid_mac,
+    normalize_mac,
 };
 use crate::mqtt::MqttClient;
 

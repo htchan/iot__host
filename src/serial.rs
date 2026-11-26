@@ -9,7 +9,7 @@
 //! - read/write errors are logged at most once per hour (legacy TODO.md item).
 
 use std::io::{BufRead, BufReader};
-use std::sync::mpsc::{channel as std_channel, Receiver as StdReceiver, Sender as StdSender};
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender, channel as std_channel};
 use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
@@ -48,7 +48,10 @@ pub fn spawn(port_name: &str, baud_rate: u32) -> Result<SerialChannel, String> {
         .spawn(move || run_loop(&port_name, baud_rate, incoming_tx, outgoing_rx))
         .map_err(|e| format!("failed to spawn serial thread: {}", e))?;
 
-    Ok(SerialChannel { incoming, outgoing: outgoing_tx })
+    Ok(SerialChannel {
+        incoming,
+        outgoing: outgoing_tx,
+    })
 }
 
 fn open_port(port_name: &str, baud_rate: u32) -> Result<Box<dyn SerialPort>, String> {
@@ -133,8 +136,10 @@ fn run_loop(
 
 fn write_line(port: &mut dyn SerialPort, line: &str) -> Result<(), String> {
     info!("Sending to hub: {}", line);
-    port.write_all(line.as_bytes()).map_err(|e| format!("write: {}", e))?;
-    port.write_all(b"\n").map_err(|e| format!("newline: {}", e))?;
+    port.write_all(line.as_bytes())
+        .map_err(|e| format!("write: {}", e))?;
+    port.write_all(b"\n")
+        .map_err(|e| format!("newline: {}", e))?;
     port.flush().map_err(|e| format!("flush: {}", e))?;
     Ok(())
 }

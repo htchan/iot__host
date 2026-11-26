@@ -167,10 +167,7 @@ mod tests {
             ("humi/ste".to_string(), "60".to_string()),
         ];
         let line = compose_serial_line("AA_BB_CC_DD_EE_00", &pairs);
-        assert_eq!(
-            line,
-            r#"[AA_BB_CC_DD_EE_00]"temp/ste:25.5","humi/ste:60""#
-        );
+        assert_eq!(line, r#"[AA_BB_CC_DD_EE_00]"temp/ste:25.5","humi/ste:60""#);
         assert_eq!(parse_serial_line(&line).expect("parse").pairs, pairs);
     }
 
@@ -183,7 +180,10 @@ mod tests {
 
     #[test]
     fn test_compose_empty_pairs() {
-        assert_eq!(compose_serial_line("AA_BB_CC_DD_EE_00", &[]), "[AA_BB_CC_DD_EE_00]");
+        assert_eq!(
+            compose_serial_line("AA_BB_CC_DD_EE_00", &[]),
+            "[AA_BB_CC_DD_EE_00]"
+        );
         assert_eq!(compose_esp_now_payload(&[]), "");
     }
 

@@ -8,8 +8,8 @@ mod api;
 mod bridge;
 mod config;
 mod db;
-mod mqtt;
 mod model;
+mod mqtt;
 mod protocol;
 mod serial;
 
@@ -19,10 +19,7 @@ use log::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let cfg = config::AppConfig::from_env();
     info!("iot__host starting");

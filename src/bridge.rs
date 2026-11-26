@@ -22,10 +22,8 @@ use log::{info, warn};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::db::DeviceStore;
+use crate::model::{DeviceConfig, compose_mqtt_topic, normalize_mac, parse_mqtt_topic};
 use crate::mqtt::{MqttClient, MqttMessage};
-use crate::model::{
-    normalize_mac, parse_mqtt_topic, compose_mqtt_topic, DeviceConfig,
-};
 use crate::protocol;
 use crate::serial::SerialEvent;
 
@@ -37,7 +35,11 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(store: DeviceStore, mqtt: MqttClient, serial_tx: StdSender<String>) -> Self {
-        Self { store, mqtt, serial_tx }
+        Self {
+            store,
+            mqtt,
+            serial_tx,
+        }
     }
 
     pub async fn handle_serial_event(&self, event: SerialEvent) {
@@ -92,7 +94,10 @@ impl Bridge {
             let (field, mq_topic) = match mapping.name.rsplit_once('/') {
                 Some((f, t)) => (f.to_string(), t.to_string()),
                 None => {
-                    warn!("mapping name '{}' for key '{}' has no '/'", mapping.name, key);
+                    warn!(
+                        "mapping name '{}' for key '{}' has no '/'",
+                        mapping.name, key
+                    );
                     continue;
                 }
             };
@@ -129,7 +134,10 @@ impl Bridge {
         let parsed = match parse_mqtt_topic(&message.topic) {
             Some(p) => p,
             None => {
-                warn!("mqtt topic does not match homeassistant/<type>/<mac>/<field>/<topic>: {}", message.topic);
+                warn!(
+                    "mqtt topic does not match homeassistant/<type>/<mac>/<field>/<topic>: {}",
+                    message.topic
+                );
                 return;
             }
         };
@@ -137,7 +145,13 @@ impl Bridge {
 
         let changed = match self
             .store
-            .upsert_value(&mac, &parsed.field_type, &parsed.field, &parsed.topic, &message.payload)
+            .upsert_value(
+                &mac,
+                &parsed.field_type,
+                &parsed.field,
+                &parsed.topic,
+                &message.payload,
+            )
             .await
         {
             Ok(c) => c,
@@ -211,11 +225,8 @@ impl Bridge {
     pub async fn send_setup_messages(&self) -> Result<(), String> {
         let devices = self.store.list_devices().await.map_err(|e| e.to_string())?;
         for device in &devices {
-            let setup_line = protocol::compose_setup_line(
-                &device.mac,
-                &device.encryption_key,
-                &device.wake_msg,
-            );
+            let setup_line =
+                protocol::compose_setup_line(&device.mac, &device.encryption_key, &device.wake_msg);
             self.send_line(&setup_line)?;
 
             let pairs = self.compose_pairs(device).await;
@@ -259,7 +270,7 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{now_rfc3339, KeyMapping, MqttConfigItem, ReplyTopic};
+    use crate::model::{KeyMapping, MqttConfigItem, ReplyTopic, now_rfc3339};
     use crate::mqtt::MqttClient;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -271,7 +282,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("iot_host_bridge_test_{}_{}.db", tag, nanos));
-        DeviceStore::new(&path.to_string_lossy()).await.expect("store")
+        DeviceStore::new(&path.to_string_lossy())
+            .await
+            .expect("store")
     }
 
     fn device() -> DeviceConfig {
@@ -315,7 +328,11 @@ mod tests {
     async fn harness() -> (Arc<Bridge>, DeviceStore, std::sync::mpsc::Receiver<String>) {
         let store = temp_store("harness").await;
         let (serial_tx, serial_rx) = std::sync::mpsc::channel::<String>();
-        let bridge = Arc::new(Bridge::new(store.clone(), MqttClient::test_client(), serial_tx));
+        let bridge = Arc::new(Bridge::new(
+            store.clone(),
+            MqttClient::test_client(),
+            serial_tx,
+        ));
         (bridge, store, serial_rx)
     }
 
@@ -325,9 +342,7 @@ mod tests {
         store.upsert_device(&device()).await.unwrap();
 
         bridge
-            .handle_serial_event(SerialEvent::Line(format!(
-                r#"[{MAC}]"act/ste:on""#
-            )))
+            .handle_serial_event(SerialEvent::Line(format!(r#"[{MAC}]"act/ste:on""#)))
             .await;
 
         let values = store.load_values(MAC).await.unwrap();
@@ -424,10 +439,7 @@ mod tests {
         let setup = rx.try_recv().expect("setup line");
         assert_eq!(setup, format!("[{MAC}]setup/testkey/wake123"));
         let values = rx.try_recv().expect("values line");
-        assert_eq!(
-            values,
-            format!(r#"[{MAC}]"temp/ste:abc","temp/cmd:def""#)
-        );
+        assert_eq!(values, format!(r#"[{MAC}]"temp/ste:abc","temp/cmd:def""#));
     }
 
     #[tokio::test]
